@@ -16,6 +16,7 @@ import taboolib.common.LifeCycle
 import taboolib.common.platform.Awake
 import taboolib.common.platform.command.command
 import taboolib.common.platform.event.SubscribeEvent
+import taboolib.common.platform.function.info
 import taboolib.common.platform.function.submitAsync
 import taboolib.common.util.Location
 import taboolib.common.util.unsafeLazy
@@ -67,6 +68,8 @@ object MultiKillingReward {
         return@ConfigNodeTransfer mapOf()
     }
 
+    val baffle = Baffle.of(600 * 50L, TimeUnit.MILLISECONDS)
+
     val killingData by unsafeLazy { createLocal("killing.json", type = Type.FAST_JSON) }
 
     val holograms = mutableMapOf<Player, AdyeshachHologram>()
@@ -99,7 +102,7 @@ object MultiKillingReward {
         }
     }
 
-    fun updateHologram() {
+    fun updateHologram(player: Player? = null) {
         val hologramHandler = Adyeshach.api().getHologramHandler()
         val items = arrayListOf<AdyeshachHologram.Item>()
         items += hologramHandler.createHologramItem(ItemStack(Material.valueOf(topItem.uppercase())), space = 0.5)
@@ -117,42 +120,29 @@ object MultiKillingReward {
 
         val loc = getTopLocation().toBukkitLocation()
 
-        Bukkit.getOnlinePlayers().forEach { player ->
+
+        if (player != null) {
             if (player in holograms) {
+                info("player ${player.name} hologram in cache.")
                 val holo = holograms[player]!!
                 holo.update(items)
                 holo.teleport(loc)
             } else {
+                info("player ${player.name} hologram not in cache.")
                 holograms[player] = hologramHandler.createHologram(player, loc, items)
             }
-        }
-    }
-
-    fun updateHologram(player: Player) {
-        val hologramHandler = Adyeshach.api().getHologramHandler()
-        val items = arrayListOf<AdyeshachHologram.Item>()
-        items += hologramHandler.createHologramItem(ItemStack(Material.valueOf(topItem.uppercase())), space = 0.5)
-        items += hologramHandler.createHologramItem(topTitle.colored(), space = 0.4)
-
-        // 击杀数排序
-        val topData = record.toList().sortedByDescending { it.second }
-
-        for ((index, it) in topData.withIndex()) {
-            if (index >= topFormat.size) break
-
-            val line = topFormat[index].replace("{0}", it.first.name).replace("{1}", it.second.toString())
-            items += hologramHandler.createHologramItem(line.colored(), space = 0.4)
-        }
-
-        val loc = getTopLocation().toBukkitLocation()
-
-
-        if (player in holograms) {
-            val holo = holograms[player]!!
-            holo.update(items)
-            holo.teleport(loc)
         } else {
-            holograms[player] = hologramHandler.createHologram(player, loc, items)
+            Bukkit.getOnlinePlayers().forEach {
+                if (it in holograms) {
+                    info("player ${it.name} hologram in cache.")
+                    val holo = holograms[it]!!
+                    holo.update(items)
+                    holo.teleport(loc)
+                } else {
+                    info("player ${it.name} hologram not in cache.")
+                    holograms[it] = hologramHandler.createHologram(it, loc, items)
+                }
+            }
         }
     }
 
@@ -165,6 +155,11 @@ object MultiKillingReward {
     @SubscribeEvent
     fun e(e: PlayerJoinEvent) {
         submitAsync { updateHologram(e.player) }
+    }
+
+    @SubscribeEvent
+    fun e(e: PlayerQuitEvent) {
+        baffle.reset(e.player.name)
     }
 
     @SubscribeEvent
@@ -181,24 +176,44 @@ object MultiKillingReward {
             1
         }
 
-        killer.setMeta("killing", count)
+        // 检查是否在规定时间内连杀
+        if (baffle.hasNext(killer.name)) {
+            // 已超时
+            info("player ${killer.name} 本次击杀已超时 $count -> 0")
+            killer.setMeta("killing", 0)
+            return
+        } else {
+            baffle.next(killer.name)
+            killer.setMeta("killing", count)
+            info("player ${killer.name} 本次击杀未超时 $count")
+        }
+
+        // 给予奖励
+        this.reward.get()[count]?.let { rewards ->
+            killer.giveItem(rewards.mapNotNull {
+                SacredItemAPI.getItem(it)?.getItemStack(killer)
+            })
+        }
 
         val record = this.record.computeIfAbsent(killer) { 0 }
+
+        info("record -> $record")
+        info("count -> $count")
+
+
         if (count > record) {
+            info("player ${killer.name} 刷新击杀记录 $record -> $count")
+
             // 刷新记录
             this.record[killer] = count
 
+            // 刷新榜单
+            updateHologram()
+
             // 存入文件
             killingData[killer.uniqueId.toString()] = count
-
-            // 给予奖励
-            this.reward.get()[count]?.let { rewards ->
-                killer.giveItem(rewards.mapNotNull {
-                    SacredItemAPI.getItem(it)?.getItemStack(killer)
-                })
-            }
+        } else {
+            info("player ${killer.name} 未能刷新击杀记录 $record -> $count")
         }
-
-        updateHologram()
     }
 }
